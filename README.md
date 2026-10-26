@@ -132,3 +132,50 @@ MyGame/
 
 不入库但本地运行必需（如需完整复现请从原游戏提取）：
 `decrypted/`、`unpacked/`、`extracted/`（wxapkg 中间产物）、`web/assets/*.bak-*`（wasm 补丁备份）。
+
+
+## 自动游玩（autoplay）
+
+控制面板在游戏画面右上角；快捷键 **F7** 启动/暂停切换、**F8** 紧急停止、**F9** 复制诊断日志。
+
+```
+web/autoplay/
+├─ perception.js     感知：rAF 内采样画布，红靶识别 + 场景粗分类（只观测）
+├─ input-adapter.js  输入：把归一化坐标翻译成游戏能收到的触摸事件
+├─ strategy.js       策略：选目标开枪 / 无目标时点屏推进（只决策）
+├─ autoplay.js       控制器：状态机 + 主循环 + 代数(generation)取消
+├─ progress-reset.js 重置：识别存档键 → 备份 → 定向清理 → 重载
+├─ diagnostics.js    诊断：动作/结果环形缓冲
+└─ ui.js             面板绑定与快捷键
+```
+
+### 三个踩坑记录（改代码前务必读）
+
+1. **不能用 `dispatchEvent(new MouseEvent(...))` 驱动游戏**。
+   weapp-adapter 会把 canvas 原型链上的 `addEventListener` / `dispatchEvent` 换成基于
+   WeakMap 的假实现。页面内派发的 DOM 事件进不了 `wx-shim` 的监听器，反而打给游戏自己的
+   `'mousedown'` 监听器，触发 `removeEventListener` 里 `r.get(this)` 为 `undefined` 的崩溃
+   （`game.js` 报 `Cannot read properties of undefined (reading 'mousedown')`）。
+   正解：走 `wx-shim.js` 暴露的 `window.__wxInjectTouch(kind, nx, ny)`，它直接调用
+   shim 的 `touchHandlers`，投递的数据与真实玩家输入同构。
+
+2. **画布像素只能在 rAF 回调「之前」采**。
+   Unity WebGL 未开启 `preserveDrawingBuffer`，缓冲在合成后即被清空。在渲染回调之后读
+   `drawImage` 大概率拿到全黑（`avgLuma = 0`）。`perception.js` 因此先读上一帧、再执行
+   游戏回调，必要时回退到回调后再试一次；同时它必须在 `wx-shim.js` **之前**加载，尽早占住
+   `requestAnimationFrame`，否则一帧都收不到。
+
+3. **重置 ≠ 刷新页面**。
+   `wxshim.fs:` 只持久化小文件（≤128KB，且排除 `.bundle/.wasm/.br/.dat/.bin` 等资源），
+   `wxcloud:<appid>/<user>/CloudGameData` 是云存档槽，`wxgame:` 下混有设备标识与游戏数据。
+   重置只清「云存档 + 存档文件镜像 + 命中进度命名的 wxgame 键」，保留设备标识、绝不碰资源缓存；
+   清除后必须 `location.reload()`——Unity 实例内存里仍持有进度，不重启会把旧数据写回去。
+
+### 验证脚本
+
+```bash
+node tools/autoplay-probe.mjs    # 一次性体检：输入链路 / 目标识别 / 存档键结构
+node tools/autoplay-e2e.mjs      # 端到端：启动→点过闪屏→战斗→射击→暂停/恢复/停止
+```
+
+两个脚本都用无头 Chrome + CDP 驱动，运行在 `http://127.0.0.1:8848/`（先 `cd web && node server.js`）。

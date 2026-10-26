@@ -104,6 +104,53 @@
     background: rgba(20,24,30,.9); color: #cfd4da; cursor: pointer;
   }
   #debug-panel button:hover { background: rgba(40,48,58,.95); }
+
+  /* ---------- 自动玩控制面板 ---------- */
+  #autoplay-panel {
+    position: fixed; top: 56px; right: 12px; z-index: 8600;
+    width: 232px; padding: 10px 12px;
+    background: rgba(11,13,16,.92); backdrop-filter: blur(8px);
+    border: 1px solid rgba(255,255,255,.14); border-radius: 12px;
+    color: #e8eaed; font-size: 12px;
+    box-shadow: 0 8px 28px rgba(0,0,0,.45);
+    user-select: none;
+  }
+  #autoplay-panel .ap-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 6px;
+  }
+  #autoplay-panel .ap-title { font-weight: 700; font-size: 12.5px; letter-spacing: .5px; }
+  #autoplay-panel .ap-fold {
+    width: 20px; height: 20px; line-height: 1; padding: 0;
+    border-radius: 6px; border: 1px solid rgba(255,255,255,.16);
+    background: rgba(30,36,44,.9); color: #cfd4da; cursor: pointer;
+  }
+  #autoplay-panel .ap-state { margin: 2px 0 4px; color: #aeb7c2; }
+  #autoplay-panel .ap-state.ap-running { color: #4ade80; }
+  #autoplay-panel .ap-state.ap-paused { color: #fbbf24; }
+  #autoplay-panel .ap-state.ap-error { color: #f87171; }
+  #autoplay-panel .ap-state.ap-starting,
+  #autoplay-panel .ap-state.ap-resetting { color: #60a5fa; }
+  #autoplay-panel .ap-meta { color: #7b838f; font-size: 11px; margin-bottom: 8px; }
+  #autoplay-panel .ap-btns {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+  }
+  #autoplay-panel .ap-btns button {
+    min-height: 28px; padding: 4px 6px; cursor: pointer;
+    border-radius: 7px; border: 1px solid rgba(255,255,255,.16);
+    background: rgba(28,34,42,.95); color: #dfe4ea; font-size: 12px;
+  }
+  #autoplay-panel .ap-btns button:hover:not(:disabled) { background: rgba(44,54,66,.98); }
+  #autoplay-panel .ap-btns button:disabled { opacity: .38; cursor: default; }
+  #autoplay-panel #ap-toggle { grid-column: 1 / -1; background: rgba(7,193,96,.92); border-color: transparent; color: #fff; font-weight: 600; }
+  #autoplay-panel #ap-toggle:hover:not(:disabled) { background: rgba(9,214,107,.98); }
+  #autoplay-panel #ap-reset { grid-column: 1 / -1; color: #fca5a5; border-color: rgba(248,113,113,.35); }
+  #autoplay-panel .ap-tip { margin-top: 7px; color: #6b7280; font-size: 10.5px; line-height: 1.5; }
+  #autoplay-panel.ap-collapsed .ap-state,
+  #autoplay-panel.ap-collapsed .ap-meta,
+  #autoplay-panel.ap-collapsed .ap-btns,
+  #autoplay-panel.ap-collapsed .ap-tip { display: none; }
+
 </style>
 </head>
 <body>
@@ -127,6 +174,23 @@
   <button data-act="verbose">切换详细日志</button>
   <button data-act="reload">重新开始</button>
   <button data-act="fullscreen">全屏</button>
+</div>
+
+<div id="autoplay-panel">
+  <div class="ap-head">
+    <span class="ap-title">自动游玩</span>
+    <button class="ap-fold" id="ap-fold" title="折叠/展开">▾</button>
+  </div>
+  <div class="ap-state ap-idle" id="ap-status">状态：待机</div>
+  <div class="ap-meta" id="ap-meta">场景 - · 目标 0 · 射击 0 · 点击 0</div>
+  <div class="ap-btns">
+    <button id="ap-toggle">启动</button>
+    <button id="ap-pause" disabled>暂停</button>
+    <button id="ap-resume" disabled>继续</button>
+    <button id="ap-stop" disabled>停止</button>
+    <button id="ap-reset">重置进度</button>
+  </div>
+  <div class="ap-tip">F7 启动/暂停 · F8 紧急停止 · F9 复制诊断</div>
 </div>
 
 <!-- ===================== 运行时（顺序不可改） ===================== -->
@@ -176,6 +240,8 @@ if (location.search.indexOf('autotest') >= 0) {
   })();
 }
 </script>
+<!-- 0.5 感知层：必须最早安装 rAF 钩子（WebGL 缓冲在合成后即被清空，只能在渲染前读上一帧） -->
+<script src="autoplay/perception.js"></script>
 <!-- 1. 微信 API 模拟层：必须先于 game.js 执行 -->
 <script src="wx-shim.js"></script>
 <!-- 2. Unity 资源桥接层 -->
@@ -184,6 +250,13 @@ if (location.search.indexOf('autotest') >= 0) {
 <script src="wx-loader.js"></script>
 <!-- 4. Unity Module 包装层 -->
 <script src="unity-shim.js"></script>
+<!-- 4.5 自动游玩模块（感知已在 0.5 处加载，这里按依赖顺序补齐其余） -->
+<script src="autoplay/input-adapter.js"></script>
+<script src="autoplay/strategy.js"></script>
+<script src="autoplay/diagnostics.js"></script>
+<script src="autoplay/progress-reset.js"></script>
+<script src="autoplay/autoplay.js"></script>
+<script src="autoplay/ui.js"></script>
 <!-- 5. 启动 -->
 <script>
 (function () {

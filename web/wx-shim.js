@@ -2113,6 +2113,36 @@
     window.addEventListener('mouseup', function (e) { if (mouseDown) { mouseDown = false; emitMouse('end', e); } });
     (mainCanvas || document.body).addEventListener('contextmenu', function (e) { e.preventDefault(); });
 
+    // ── 自动玩输入注入 ────────────────────────────────────────────────
+    // 为什么需要它：weapp-adapter 会把 canvas 原型链上的 addEventListener /
+    // dispatchEvent 替换成基于 WeakMap 的假实现。页面内 dispatchEvent(new
+    // MouseEvent(...)) 因此不会进入本 shim 的监听器，而是打给游戏自己的
+    // 'mousedown' 监听器，触发 removeEventListener 里 r.get(this) 为 undefined
+    // 的崩溃。所以自动玩改为直接调用 touchHandlers，投递与真实玩家输入
+    // 结构完全一致的数据（与 toTouchList/emitMouse 同构）。
+    //
+    // 坐标：nx/ny 为画布归一化坐标(0..1)，内部换算为画布 CSS 局部像素。
+    function injectTouch(kind, nx, ny) {
+      var c = mainCanvas || document.querySelector('canvas');
+      if (!c) return 0;
+      var w = c.clientWidth || c.width || 1;
+      var h = c.clientHeight || c.height || 1;
+      var cx = Math.max(0, Math.min(w, nx * w));
+      var cy = Math.max(0, Math.min(h, ny * h));
+      var list = [{ identifier: 0, pageX: cx, pageY: cy, clientX: cx, clientY: cy, x: cx, y: cy, force: 1 }];
+      var handlers = touchHandlers[kind] || [];
+      for (var i = 0; i < handlers.length; i++) {
+        try {
+          handlers[i]({ touches: kind === 'end' ? [] : list, changedTouches: list, timeStamp: performance.now() });
+        } catch (e) { console.error('[inject:' + kind + ']', e); }
+      }
+      return handlers.length;
+    }
+    window.__wxInjectTouch = injectTouch;
+    window.__wxTouchHandlerCount = function () {
+      return { start: touchHandlers.start.length, move: touchHandlers.move.length, end: touchHandlers.end.length };
+    };
+
     // Pointer 事件（触屏笔记本 / 移动端浏览器）
     var pointerDown = false;
     function pointerToList(ev) {
@@ -3156,6 +3186,24 @@
       var o = {};
       Object.keys(memFS).forEach(function (k) { o[k] = memFS[k].size || 0; });
       return o;
+    },
+    // 供「重置游戏进度」使用：只清存档类文件，绝不碰资源缓存
+    // （资源缓存都是大文件，落在 StreamingAssets / downloaded / wasmcode 下，
+    //   或被 FS_PERSIST_SKIP_EXT 排除，这里按路径白名单反向排除）
+    clearSaveFiles: function () {
+      var RES_RE = /StreamingAssets|^usr\/downloaded|^usr\/wasmcode|\.(bundle|wasm|br|dat|bin|unityweb|png|jpg|jpeg|ogg|mp3|wav)$/i;
+      var removed = 0;
+      Object.keys(memFS).forEach(function (k) {
+        if (!RES_RE.test(k)) { delete memFS[k]; removed++; }
+      });
+      try {
+        var lsKeys = [];
+        for (var i = 0; i < localStorage.length; i++) lsKeys.push(localStorage.key(i));
+        lsKeys.forEach(function (k) {
+          if (k && k.indexOf(FS_PERSIST_PREFIX) === 0) localStorage.removeItem(k);
+        });
+      } catch (e) { /* ignore */ }
+      return removed;
     },
     verbose: function (v) { if (v) localStorage.setItem('wxshim.verbose', '1'); else localStorage.removeItem('wxshim.verbose'); location.reload(); }
   };
