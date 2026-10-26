@@ -71,21 +71,30 @@ def main():
     limit = 4000
     if '--limit' in sys.argv:
         limit = int(sys.argv[sys.argv.index('--limit') + 1])
-    src = M.MAIN
+    want_split = '--split' in sys.argv
+    src = M.SPLIT if want_split else M.MAIN
     if '--src' in sys.argv and sys.argv[sys.argv.index('--src') + 1] == 'backup':
-        src = M.MAIN + M.MARK
+        src = src + M.MARK
     elif '--src' in sys.argv:
         src = sys.argv[sys.argv.index('--src') + 1]
 
-    tn, mn = target.split('::', 1)
-    res = WM.resolve(tn, mn)
+    if target.startswith('midx:'):
+        e = {'module': 'split' if want_split else 'main', 'local': int(target.split(':')[1], 0)}
+        res = [e]
+    else:
+        res = WM.resolve(*target.split('::', 1))
+    tn = target
+    mn = ''
+    if not target.startswith('midx:'):
+        pass
     if not res:
         print('未解析', target); return
-    e = [x for x in res if x.get('module') == 'main']
+    mod_want = 'split' if want_split else 'main'
+    e = [x for x in res if x.get('module') == mod_want]
     if not e:
-        print('不在 main 模块：', res); return
+        print('不在 %s 模块：' % mod_want, res); return
     e = e[0]
-    module, local = 'main', e['local']
+    module, local = mod_want, e['local']
 
     print('建立方法名索引…')
     n = build_rev()

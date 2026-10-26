@@ -39,13 +39,17 @@ PROBE_MAIN = [
     ('ClampAimingDirection',  10887, False),
     ('CalculateSwayOffset',   10888, False),
     # ── 射击主链（Shoot 内部按顺序调用的就是这几步）──
-    ('Shoot',                 10883, False),
+    # want_ret=True：每个 return 出口单独计数 → 一眼看出「从哪个提前返回退出」
+    ('Shoot',                 10883, True),
     ('AllowAimingCheck',      10881, False),
     ('GetMouseButtonUp',       1973, False),
     ('AreBarrelsReadyToFire',  8899, False),
-    ('HasHealthInShotRadius',  8908, False),
-    ('SimulateShot',           8905, False),
-    ('ShootWeapon',           10506, False),
+    ('HasHealthInShotRadius',  8908, True),
+    ('SimulateShot',           8905, True),
+    # 命中解析循环体内部才会调用的两个方法：用来判定 sphere cast 之后循环有没有真跑
+    ('SimulatorSimulateShot',  8906, False),
+    ('HitMultiplierBodyPart', 10643, False),
+    ('ShootWeapon',           10506, True),
     ('PlayProjectileSniper',   8135, False),
     ('LargeVibration',         8136, False),
     ('EnableBulletCam',       10884, False),
@@ -56,6 +60,9 @@ PROBE_MAIN = [
     ('RangeTargetOnKill',     10686, False),
     ('RangeTargetRevive',     10684, False),
     ('CountAliveHealth',       9572, False),
+    # ── 异步/协程生命周期（MoveNext 每进入一次 = 状态机推进一步）──
+    ('MadeHitMoveNext',        8678, False),
+    ('HitHealthRoutineMN',     9936, False),
 ]
 PROBE_SPLIT = [
     ('ShootAsync',        51980, True),
@@ -71,7 +78,64 @@ PROBE_SPLIT = [
     ('HSHitTakeDamage',  43447, False),
     ('HSHitCtor',        43450, False),
     ('EnemyOnTakeDamage', 41725, False),
+    ('ShootAsyncMN',     40148, False),
+    ('ShootRoutineMN',   40153, False),
 ]
+
+# 协程状态位掩码：(标签, this 偏移, 掩码)
+# 入口处取 `(this[off] & mask)`，用 1<<x 或进一个全局 ——
+# 一次运行结束就能读回「状态机实际走过哪几个 state」，负数状态落在高位。
+STATE_BITS_MAIN = {
+    9936: ('HitHealthMN', 8, 31, 8),
+    8678: ('MadeHitMN', 8, 31, 8),
+}
+STATE_BITS_SPLIT = {
+    40153: ('ShootRoutineMN', 8, 31, 8),
+    40148: ('ShootAsyncMN', 8, 31, 8),
+}
+
+# 指针捕获：(标签, 局部变量索引) —— 入口处 `local.get N; global.set G`
+# JS 侧读 G.value 就拿到对象地址，再用 window.__wasmMemory 解引用出集合/对象/类型名。
+CAPTURE_MAIN = {
+    9572: ('tutSeqEvent', 0),      # WaitForHealthComponentsKilledSequenceEvent 实例
+    8906: ('hitResults', 2),       # SimulateShot 的 RaycastHit[] results 参数
+}
+CAPTURE_SPLIT = {}
+
+# 取值捕获：模块函数索引 -> [(偏移, 标签, 局部变量索引)]
+# 在该指令前插入 `local.get L; global.set G` —— 直接读出某个局部（如返回值）的当前值
+VALUE_SITES_MAIN = {
+    # CountAliveHealthComponents 的返回累积量就是 local6（0xec local.get 6 / 0xee return）
+    9572: [(0xe5, 'tutAliveCount', 6)],
+    # RangedWeaponShotSimulator::SimulateShot 里 SphereCastNonAlloc 的命中数：
+    #   0x4a6 call ; 0x4a9 local.set 12 ; 0x4b2 br_if 0（n<=0 直接跳过整个命中解析循环）
+    8906: [(0x4ab, 'sphereHits', 12)],
+}
+VALUE_SITES_SPLIT = {}
+
+# 内存取值捕获：模块函数索引 -> [(偏移, 标签, 局部变量, 再取偏移, 类型)]
+# 在该指令前插入  local.get L [; f32.load off=X | i32.load off=X] [; i32.reinterpret_f32] ; global.set G
+# 用来把「帧上的结构体字段」直接搬到全局，JS 侧一次读回。
+#   类型 'i32' = 直接读指针/整数；'f32' = 读浮点并重解释成 i32 位模式
+LOAD_SITES_MAIN = {
+    8906: [
+        # 命中结构体在 frame+96；RaycastHit: Point(0) Normal(12) FaceID(24) Distance(28) Collider(40)
+        (0x6a7, 'hitCollider', 6, 136, 'i32'),        # frame+96+40
+        (0x6a7, 'hitDist',     6, 124, 'f32'),        # frame+96+28
+        (0x6a7, 'hitPointX',   6,  96, 'f32'),
+        (0x6a7, 'hitPointY',   6, 100, 'f32'),
+        (0x6a7, 'hitPointZ',   6, 104, 'f32'),
+        # 射线参数：frame+32=origin(x,y) frame+16=direction(x,y)，z 在 +88 / +72
+        (0x486, 'rayOx',       6,  32, 'f32'),
+        (0x486, 'rayOy',       6,  36, 'f32'),
+        (0x486, 'rayOz',       6,  88, 'f32'),
+        (0x486, 'rayDx',       6,  16, 'f32'),
+        (0x486, 'rayDy',       6,  20, 'f32'),
+        (0x486, 'rayDz',       6,  72, 'f32'),
+    ],
+}
+LOAD_SITES_SPLIT = {}
+
 
 # 分支站点：模块函数索引 -> [(原指令偏移, 标签)]
 # 把 br_if L 改写成 if(bump; br L+1) end —— 语义不变，但「这个守卫真的拒绝了」可计数
@@ -81,6 +145,10 @@ BRANCH_SITES = {
     # FPSPlayerController::Update 的六道闸门（br_if 0 = 跳过本帧射击）
     10882: [(0xc0, 'upd_canfire'), (0xca, 'upd_f36'), (0xd3, 'upd_settings'),
             (0xda, 'upd_f24'), (0xe4, 'upd_mouseup'), (0xeb, 'upd_f56')],
+    # RangedWeaponShotSimulator::SimulateShot 里「最佳命中」的三道筛除
+    8906: [(0x789, 'SIM_rej_flag76'),     # local8->[76] != 0        → 跳过
+           (0x7b1, 'SIM_rej_noHealth'),   # GetComponent<HealthComp>() == null → 跳过
+           (0x7bb, 'SIM_rej_notAlive')],  # !HealthComponent::get_IsAlive()    → 跳过
 }
 # 打点：模块函数索引 -> [(原指令偏移, 标签)]，含义是「执行流走到了这里」
 POINT_SITES = {
@@ -224,6 +292,40 @@ def mk_bump(g):
     return b'\x23' + uleb_enc(g) + b'\x41\x01\x6a' + b'\x24' + uleb_enc(g)
 
 
+def mk_capture(g, li):
+    """local.get li ; global.set g —— 把对象地址存进全局给 JS 读"""
+    return b'\x20' + uleb_enc(li) + b'\x24' + uleb_enc(g)
+
+
+def mk_load_capture(g, li, load_off, kind):
+    """local.get li [; load off] [; i32.reinterpret_f32] ; global.set g"""
+    out = b'\x20' + uleb_enc(li)
+    if load_off is not None:
+        if kind == 'f32':
+            out += b'\x2a' + uleb_enc(2) + uleb_enc(load_off)    # f32.load
+            out += b'\xbc'                                        # i32.reinterpret_f32
+        else:
+            out += b'\x28' + uleb_enc(2) + uleb_enc(load_off)    # i32.load
+    out += b'\x24' + uleb_enc(g)
+    return out
+
+
+
+def mk_state_bit(g, off, mask, bias=0):
+    """把 ((this[off]+bias) & mask) 对应的那一位置进全局。
+    bias 让负数状态也落在低位，避免歧义（bias=8 时 bit i 表示 state = i-8）。"""
+    out = (b'\x20\x00'                                  # local.get 0  (this)
+           + b'\x28' + uleb_enc(2) + uleb_enc(off)      # i32.load offset=off
+           )
+    if bias:
+        out += b'\x41' + uleb_enc(bias) + b'\x6a'       # + bias
+    out += (b'\x41' + uleb_enc(mask) + b'\x71'          # & mask
+            + b'\x41\x01' + b'\x74'                     # 1 << x
+            + b'\x23' + uleb_enc(g) + b'\x72'           # | global
+            + b'\x24' + uleb_enc(g))                    # global.set
+    return out
+
+
 # ------------------------------------------------------------------ 打补丁
 class Module:
     def __init__(self, path):
@@ -345,13 +447,22 @@ class Module:
         return len(data)
 
 
-def instrument(path, plan, tag, branches=None, points=None):
+def instrument(path, plan, tag, branches=None, points=None, state_bits=None,
+               capture=None, value_sites=None, load_sites=None):
     """plan: [(label, 模块函数索引, want_returns)]
     branches: {模块函数索引: [(原偏移, 标签)]}  —— br_if 改写为 if(bump; br L+1) end
     points:   {模块函数索引: [(原偏移, 标签)]}  —— 在该指令前打点计数
+    state_bits: {模块函数索引: (标签, 偏移, 掩码, 偏置)} —— 状态位掩码累积
+    capture:  {模块函数索引: (标签, 局部变量索引)}  —— 入口把对象地址存进全局
+    value_sites: {模块函数索引: [(偏移, 标签, 局部变量索引)]} —— 读局部当前值
+    load_sites:  {模块函数索引: [(偏移, 标签, 局部变量, 再取偏移, 'i32'|'f32')]} —— 读内存
     """
     branches = branches or {}
     points = points or {}
+    state_bits = state_bits or {}
+    capture = capture or {}
+    value_sites = value_sites or {}
+    load_sites = load_sites or {}
     m = Module(path)
     buf, ranges = m.body_ranges()
     n_imp, _ = m.import_counts()
@@ -374,7 +485,7 @@ def instrument(path, plan, tag, branches=None, points=None):
                 names.append('%s_%s_r%d' % (tag, label, k + 1))
                 ret_idx.append(k)
             names.append('%s_%s_end' % (tag, label))
-        entries.append((label, bi, ret_idx, len(sites)))
+        entries.append((label, bi, ret_idx, len(sites), want_ret))
 
     # 分支 / 打点计数器
     site_names = {}
@@ -388,6 +499,28 @@ def instrument(path, plan, tag, branches=None, points=None):
             nm = '%s_PT_%s' % (tag, label)
             names.append(nm)
             site_names[(midx, off)] = nm
+    bm_names = {}
+    for midx, (label, off, mask, bias) in state_bits.items():
+        nm = '%s_BM_%s' % (tag, label)
+        names.append(nm)
+        bm_names[midx] = (nm, off, mask, bias)
+    cap_names = {}
+    for midx, (label, li) in capture.items():
+        nm = '%s_CAP_%s' % (tag, label)
+        names.append(nm)
+        cap_names[midx] = (nm, li)
+    val_names = {}
+    for midx, lst in (value_sites or {}).items():
+        for off, label, li in lst:
+            nm = '%s_VAL_%s' % (tag, label)
+            names.append(nm)
+            val_names.setdefault(midx, []).append((off, nm, li))
+    load_names = {}
+    for midx, lst in (load_sites or {}).items():
+        for off, label, li, loff, kind in lst:
+            nm = '%s_LD_%s' % (tag, label)
+            names.append(nm)
+            load_names.setdefault(midx, []).append((off, nm, li, loff, kind))
 
     idxs = m.add_globals(names)
     m.add_exports([(n, g) for n, g in zip(names, idxs)])
@@ -396,7 +529,7 @@ def instrument(path, plan, tag, branches=None, points=None):
     # 统一按「原偏移」建 prefix / replace，每个 body 只改写一次
     prefix_all, replace_all = {}, {}
 
-    for label, bi, ret_idx, nsites in entries:
+    for label, bi, ret_idx, nsites, want_ret in entries:
         s, e = ranges[bi]
         body = buf[s:e]
         le = m.locals_end(body)
@@ -409,7 +542,9 @@ def instrument(path, plan, tag, branches=None, points=None):
             if k < len(sites):
                 g = gmap['%s_%s_r%d' % (tag, label, k + 1)]
                 pf[sites[k]] = pf.get(sites[k], b'') + mk_bump(g)
-        if ret_idx:
+        if want_ret:
+            # 无条件补一个「跑到函数末尾」计数器：
+            # 有 return 的函数里它 = 正常落地；没有 return 的函数里它就是唯一出口。
             g = gmap['%s_%s_end' % (tag, label)]
             pf[end_off] = pf.get(end_off, b'') + mk_bump(g)
 
@@ -430,6 +565,32 @@ def instrument(path, plan, tag, branches=None, points=None):
         for off, label in points.get(midx, []):
             nm = site_names[(midx, off)]
             pf[off] = pf.get(off, b'') + mk_bump(gmap[nm])
+
+    # 状态位掩码：插在函数体第一条指令之前（前后都不压栈，语义中性）
+    for midx, (nm, off, mask, bias) in bm_names.items():
+        bi = midx - n_imp
+        pf = prefix_all.setdefault(bi, {})
+        pf[0] = pf.get(0, b'') + mk_state_bit(gmap[nm], off, mask, bias)
+
+    # 指针捕获：同样插在函数体入口
+    for midx, (nm, li) in cap_names.items():
+        bi = midx - n_imp
+        pf = prefix_all.setdefault(bi, {})
+        pf[0] = pf.get(0, b'') + mk_capture(gmap[nm], li)
+
+    # 取值捕获：在某条指令前读一个局部的当前值（返回值 / 命中数 / 计数）
+    for midx, lst in val_names.items():
+        bi = midx - n_imp
+        pf = prefix_all.setdefault(bi, {})
+        for off, nm, li in lst:
+            pf[off] = pf.get(off, b'') + mk_capture(gmap[nm], li)
+
+    # 内存取值捕获：把帧上结构体的字段直接搬回全局
+    for midx, lst in load_names.items():
+        bi = midx - n_imp
+        pf = prefix_all.setdefault(bi, {})
+        for off, nm, li, loff, kind in lst:
+            pf[off] = pf.get(off, b'') + mk_load_capture(gmap[nm], li, loff, kind)
 
     repl = {}
     report = []
@@ -500,10 +661,12 @@ def main():
             else:
                 shutil.copyfile(mk, p)      # 保证从干净原件开始
         all_names = []
-        for path, plan, tag, br, pt in (
-                (MAIN, PROBE_MAIN, 'main', BRANCH_SITES, POINT_SITES),
-                (SPLIT, PROBE_SPLIT, 'split', {}, {})):
-            rep, size, names = instrument(path, plan, tag, br, pt)
+        for path, plan, tag, br, pt, bm, cap, vs, ld in (
+                (MAIN, PROBE_MAIN, 'main', BRANCH_SITES, POINT_SITES,
+                 STATE_BITS_MAIN, CAPTURE_MAIN, VALUE_SITES_MAIN, LOAD_SITES_MAIN),
+                (SPLIT, PROBE_SPLIT, 'split', {}, {},
+                 STATE_BITS_SPLIT, CAPTURE_SPLIT, VALUE_SITES_SPLIT, LOAD_SITES_SPLIT)):
+            rep, size, names = instrument(path, plan, tag, br, pt, bm, cap, vs, ld)
             all_names += names
             print('\n== %s -> %d 字节（%d 个计数器）' % (os.path.basename(path), size, len(names)))
             for bi, old, new, nbr, npt in rep:

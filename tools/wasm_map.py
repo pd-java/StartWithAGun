@@ -218,11 +218,21 @@ if __name__ == '__main__':
 
 
 # ---- 按 程序集(CodeGenModule) 解析 token → 表索引 ----
+_IMAGE_BUF = []
+
+
+def _image_buf():
+    """整个数据段镜像只重建一次（否则每个程序集都要重扫 38MB）"""
+    if not _IMAGE_BUF:
+        _IMAGE_BUF.append(mem_read(scan_lo, scan_hi - scan_lo))
+    return _IMAGE_BUF[0]
+
+
 def find_codegen_module(module_name):
     saddr = find_string(module_name)
     if saddr is None:
         return None
-    buf = mem_read(scan_lo, scan_hi - scan_lo)
+    buf = _image_buf()
     tgt = struct.pack('<I', saddr)
     i = buf.find(tgt)
     while i >= 0:
