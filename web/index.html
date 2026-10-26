@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>开局带把枪 · SniperSiege（本地离线版）</title>
+<style>
+  :root {
+    --accent: #07C160;
+    --bg: #0b0d10;
+    --fg: #e8eaed;
+    --dim: #8b929c;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: var(--bg); overflow: hidden;
+    -webkit-user-select: none; user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    color: var(--fg);
+  }
+  #game-container {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  canvas { display: block; }
+
+  /* ---------- 启动遮罩 ---------- */
+  #boot-overlay {
+    position: fixed; inset: 0; z-index: 9000;
+    background: radial-gradient(circle at 50% 35%, #16202b 0%, #0b0d10 70%);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 22px;
+    transition: opacity .4s ease;
+  }
+  #boot-overlay .logo {
+    width: 84px; height: 84px; border-radius: 20px;
+    background: linear-gradient(145deg, #1f9d55, #0a6b38);
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 10px 40px rgba(7,193,96,.28);
+    position: relative;
+  }
+  #boot-overlay .logo::after {
+    content: ""; width: 34px; height: 34px;
+    border: 3px solid rgba(255,255,255,.92); border-radius: 50%;
+    border-top-color: transparent; border-right-color: transparent;
+    transform: rotate(45deg);
+  }
+  #boot-overlay .title { font-size: 19px; font-weight: 700; letter-spacing: .5px; }
+  #boot-overlay .sub { font-size: 12px; color: var(--dim); letter-spacing: 2px; text-transform: uppercase; }
+  #boot-progress {
+    width: min(300px, 62vw); height: 4px; border-radius: 2px;
+    background: rgba(255,255,255,.1); overflow: hidden;
+  }
+  #boot-progress-inner {
+    height: 100%; width: 0%;
+    background: linear-gradient(90deg, #07C160, #4ade80);
+    transition: width .25s ease;
+  }
+  #boot-status { font-size: 12px; color: var(--dim); height: 16px; }
+
+  #start-btn {
+    margin-top: 6px;
+    padding: 13px 42px; border: 0; border-radius: 999px;
+    background: var(--accent); color: #fff;
+    font-size: 15px; font-weight: 600; letter-spacing: 1px;
+    cursor: pointer; box-shadow: 0 6px 24px rgba(7,193,96,.4);
+    transition: transform .15s ease, box-shadow .15s ease;
+  }
+  #start-btn:hover { transform: translateY(-1px); box-shadow: 0 8px 28px rgba(7,193,96,.5); }
+  #start-btn:active { transform: translateY(1px) scale(.98); }
+
+  /* ---------- 顶部提示 ---------- */
+  #hud-tip {
+    position: fixed; left: 50%; top: 16px; transform: translateX(-50%);
+    z-index: 8000; pointer-events: none;
+    padding: 8px 16px; border-radius: 999px;
+    background: rgba(0,0,0,.62); backdrop-filter: blur(8px);
+    font-size: 12px; color: #d5d9df; white-space: nowrap;
+    opacity: 0; transition: opacity .4s ease;
+  }
+
+  /* ---------- 出错 ---------- */
+  #fatal-error {
+    display: none; position: fixed; left: 16px; right: 16px; top: 16px;
+    z-index: 10000; max-height: 70vh; overflow: auto;
+    padding: 16px 18px; border-radius: 12px;
+    background: rgba(60, 12, 14, .96); border: 1px solid #7f1d1d;
+    color: #fecaca; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: pre-wrap;
+  }
+
+  /* ---------- 调试面板 ---------- */
+  #debug-panel {
+    position: fixed; right: 10px; bottom: 10px; z-index: 8500;
+    display: none; flex-direction: column; gap: 6px;
+    font-size: 11px;
+  }
+  #debug-panel button {
+    padding: 6px 10px; border-radius: 6px; border: 1px solid rgba(255,255,255,.15);
+    background: rgba(20,24,30,.9); color: #cfd4da; cursor: pointer;
+  }
+  #debug-panel button:hover { background: rgba(40,48,58,.95); }
+</style>
+</head>
+<body>
+
+<div id="game-container"></div>
+
+<div id="boot-overlay">
+  <div class="logo"></div>
+  <div class="title">开局带把枪</div>
+  <div class="sub">Sniper Siege · Local Offline Port</div>
+  <div id="boot-progress"><div id="boot-progress-inner"></div></div>
+  <div id="boot-status">准备中…</div>
+  <button id="start-btn">开 始 游 戏</button>
+</div>
+
+<div id="hud-tip">点击 / 拖动屏幕进行操作 · 卡住时按 F9 导出诊断日志</div>
+<div id="fatal-error"></div>
+
+<div id="debug-panel">
+  <button data-act="copylog">复制诊断日志</button>
+  <button data-act="verbose">切换详细日志</button>
+  <button data-act="reload">重新开始</button>
+  <button data-act="fullscreen">全屏</button>
+</div>
+
+<!-- ===================== 运行时（顺序不可改） ===================== -->
+<!-- 0. 自动化测试钩子（仅 ?autotest 时启用）：rAF 帧内采样 WebGL 画布红靶标 -->
+<script>
+if (location.search.indexOf('autotest') >= 0) {
+  (function () {
+    var buf = null;
+    function capture() {
+      try {
+        var c = document.querySelector('canvas');
+        if (!c || !c.width) return;
+        var W = 300, H = Math.round(c.height / c.width * 300);
+        if (!buf) buf = document.createElement('canvas');
+        if (buf.width !== W || buf.height !== H) { buf.width = W; buf.height = H; }
+        var g = buf.getContext('2d');
+        g.drawImage(c, 0, 0, W, H);
+        var d = g.getImageData(0, 0, W, H).data;
+        var cells = {};
+        for (var y = 0; y < H; y++) for (var x = 0; x < W; x++) {
+          var i = (y * W + x) * 4, r = d[i], gg = d[i + 1], b = d[i + 2];
+          if (r > 120 && gg < 75 && b < 75 && r - gg > 70) cells[Math.floor(x / 12) + ',' + Math.floor(y / 12)] = 1;
+        }
+        var seen = {}, out = [];
+        for (var k in cells) {
+          if (seen[k]) continue;
+          var sx = 0, sy = 0, n = 0, stack = [k];
+          while (stack.length) {
+            var kk = stack.pop(); if (seen[kk]) continue; seen[kk] = 1;
+            var p = kk.split(','), cx = +p[0], cy = +p[1];
+            sx += cx; sy += cy; n++;
+            [[1,0],[-1,0],[0,1],[0,-1]].forEach(function (dd) {
+              var nk = (cx + dd[0]) + ',' + (cy + dd[1]);
+              if (cells[nk] && !seen[nk]) stack.push(nk);
+            });
+          }
+          if (n >= 2) out.push({ x: (sx / n + 0.5) * 12 / W, y: (sy / n + 0.5) * 12 / H, n: n });
+        }
+        window.__redTargets = out;
+        window.__frameCount = (window.__frameCount || 0) + 1;
+      } catch (e) { window.__capErr = String(e); }
+    }
+    var _raf = window.requestAnimationFrame.bind(window);
+    window.requestAnimationFrame = function (cb) {
+      return _raf(function (t) { var r = cb(t); capture(); return r; });
+    };
+  })();
+}
+</script>
+<!-- 1. 微信 API 模拟层：必须先于 game.js 执行 -->
+<script src="wx-shim.js"></script>
+<!-- 2. Unity 资源桥接层 -->
+<script src="unity-data-hook.js"></script>
+<!-- 3. 微信模块运行时（define / require / requirePlugin） -->
+<script src="wx-loader.js"></script>
+<!-- 4. Unity Module 包装层 -->
+<script src="unity-shim.js"></script>
+<!-- 5. 启动 -->
+<script>
+(function () {
+  var startBtn = document.getElementById('start-btn');
+  var overlay = document.getElementById('boot-overlay');
+  var status = document.getElementById('boot-status');
+  var bar = document.getElementById('boot-progress-inner');
+
+  var started = false;
+
+  function begin() {
+    if (started) return;
+    started = true;
+    // 用户手势内 resume 音频（浏览器自动播放策略）
+    try {
+      var AC = window.__NativeAudioContext || window.AudioContext;
+      if (AC) { window.__bgAudioCtx = new AC(); window.__bgAudioCtx.resume(); }
+    } catch (e) {}
+    if (startBtn) startBtn.style.display = 'none';
+    if (status) status.textContent = '正在加载脚本…';
+    if (bar) bar.style.width = '8%';
+    // 让出两帧，保证按钮状态已经绘制
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        window.__wxBoot();
+      });
+    });
+  }
+
+  startBtn.addEventListener('click', begin);
+  // 也支持直接按回车 / 空格
+  window.addEventListener('keydown', function (e) {
+    if (!started && (e.key === 'Enter' || e.key === ' ')) begin();
+  });
+
+  // 预取大文件（不阻塞 UI）
+  setTimeout(function () {
+    if (window.__unityHook && window.__unityHook.prefetch) window.__unityHook.prefetch();
+  }, 300);
+
+  // 调试面板：URL 带 ?debug 才显示
+  if (/[?&]debug\b/.test(location.search)) {
+    document.getElementById('debug-panel').style.display = 'flex';
+    document.querySelectorAll('#debug-panel button').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var act = b.getAttribute('data-act');
+        if (act === 'verbose') window.__wxShim.verbose(!localStorage.getItem('wxshim.verbose'));
+        if (act === 'reload') location.reload();
+        if (act === 'copylog') {
+          var dump = '';
+          try { dump = window.__wxShimLogDump ? window.__wxShimLogDump() : '(无日志缓冲)'; } catch (e) { dump = '(导出失败 ' + e.message + ')'; }
+          var done = function () {
+            b.textContent = '✅ 已复制，请粘贴给助手';
+            setTimeout(function () { b.textContent = '复制诊断日志'; }, 2500);
+          };
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(dump).then(done).catch(function () {
+              prompt('请手动复制以下日志（Ctrl+A 全选）：', dump); done();
+            });
+          } else {
+            prompt('请手动复制以下日志（Ctrl+A 全选）：', dump); done();
+          }
+        }
+        if (act === 'fullscreen') {
+          var el = document.documentElement;
+          if (!document.fullscreenElement) el.requestFullscreen && el.requestFullscreen();
+          else document.exitFullscreen && document.exitFullscreen();
+        }
+      });
+    });
+  }
+
+  // 把未捕获异常显示到页面上，方便排查
+  window.addEventListener('error', function (e) {
+    if (!e || !e.message) return;
+    var fe = document.getElementById('fatal-error');
+    if (fe && fe.style.display !== 'block') {
+      fe.style.display = 'block';
+      fe.textContent = '运行时错误：' + e.message + '\n' + (e.filename || '') + ':' + (e.lineno || '');
+    }
+  });
+})();
+</script>
+</body>
+</html>

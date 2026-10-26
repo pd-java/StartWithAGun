@@ -1,0 +1,22 @@
+# ── 大体积补丁备份（本地保留，不入库）─────────────────────────
+# 4 个 wasm 补丁历史备份共 106MB，均为「可由 tools/ 脚本重新生成」的中间态
+web/assets/*.bak-*
+web/assets/*.bak
+
+# ── wxapkg 解密 / 解包 / 提取中间产物（44MB，二进制，工具可重建）──
+/decrypted/
+/unpacked/
+/extracted/
+
+# ── 工具生成的中间数据（可由 tools/wasm_fi_names.py build 重建）──
+tools/fi_names.json
+
+# ── 日志与运行时产物 ────────────────────────────────────────
+*.log
+node_modules/
+.workbuddy/
+
+# ── 系统文件 ────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini

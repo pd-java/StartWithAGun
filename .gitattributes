@@ -1,0 +1,16 @@
+# 二进制资源：禁止 Git 尝试文本 diff / 行尾转换，避免仓库膨胀和误判
+*.wasm      binary
+*.bin       binary
+*.bundle    binary
+*.br        binary
+*.png       binary
+*.jpg       binary
+*.dat       binary
+
+# 源码统一 LF
+*.js        text eol=lf
+*.mjs       text eol=lf
+*.py        text eol=lf
+*.json      text eol=lf
+*.md        text eol=lf
+*.html      text eol=lf
