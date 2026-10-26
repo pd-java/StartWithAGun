@@ -1589,6 +1589,20 @@
               // 用 microtask（Promise.then）延后，等 framework 自己的初始化栈退干净，
               // resume() 就能拿到完整的 mainLoop 状态。
               Promise.resolve().then(function () {
+                // ── 诊断桩出口 ────────────────────────────────────────
+                // tools/wasm_probe_marker.py 会在 wasm 里追加一批「计数器全局」
+                // 并导出成 main_Shoot_in / main_BR_rej_barrels 之类的名字。
+                // 这里把 exports 挂到 window 上，JS 侧即可直接读 .value。
+                // 未打桩时这里只是多一个对象，无副作用。
+                try { window.__wasmMainExports = res.instance.exports; } catch (e) {}
+                try {
+                  // 同一批诊断桩需要读线性内存（例如把命中结构体指针读出来）
+                  if (imports && imports.primary && imports.primary.memory) {
+                    window.__wasmMemory = imports.primary.memory;
+                  } else if (res.instance.exports && res.instance.exports.memory) {
+                    window.__wasmMemory = res.instance.exports.memory;
+                  }
+                } catch (e) {}
                 done(res.instance, res.module);
               });
             });

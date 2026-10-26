@@ -2,6 +2,8 @@
 # 4 个 wasm 补丁历史备份共 106MB，均为「可由 tools/ 脚本重新生成」的中间态
 web/assets/*.bak-*
 web/assets/*.bak
+# 诊断打桩前的原始 wasm 快照（tools/wasm_probe_marker.py install 生成，61MB）
+web/assets/*.orig-probe
 
 # ── wxapkg 解密 / 解包 / 提取中间产物（44MB，二进制，工具可重建）──
 /decrypted/
