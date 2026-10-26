@@ -99,6 +99,8 @@ STATE_BITS_SPLIT = {
 CAPTURE_MAIN = {
     9572: ('tutSeqEvent', 0),      # WaitForHealthComponentsKilledSequenceEvent 实例
     8906: ('hitResults', 2),       # SimulateShot 的 RaycastHit[] results 参数
+    # Shoot 的 this：入口 local0。用来读 this[180]（射界半径）和 this[16]->[52]（CharacterWeapons）
+    10883: ('shootThis', 0),
 }
 CAPTURE_SPLIT = {}
 
