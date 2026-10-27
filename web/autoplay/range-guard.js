@@ -235,10 +235,15 @@
      */
     allowShot: function () {
       var p = this.probe();
-      if (p.verdict === 'UNAVAILABLE') return { allowed: true, reason: 'guard-unavailable', weaponRangeCheck: 'unknown' };
-      if (p.verdict === 'OUT_OF_RANGE') return { allowed: false, reason: 'beyond-range', hitDistance: p.hitDistance, weaponRangeCheck: 'beyond-range' };
-      if (p.verdict === 'NO_CONTACT') return { allowed: true, reason: 'camera-ray-no-contact', weaponRangeCheck: 'unknown' };
-      return { allowed: true, reason: 'in-range', hitDistance: p.hitDistance, weaponRangeCheck: 'in-range' };
+      var d = this.decideFromObservation({
+        available: p.verdict !== 'UNAVAILABLE',
+        weaponRangeCheck: p.weaponRangeCheck,
+        cameraRayContact: p.cameraRayContact,
+        cameraRayDistance: p.cameraRayDistance,
+        hitDistance: p.hitDistance
+      });
+      d.via = 'crosshair';
+      return d;
     },
 
     /**
@@ -308,13 +313,41 @@
     },
 
     /**
-     * 开火前的最终闸门。
+     * ★ 纯决策函数：只吃一个观测对象，不碰引擎。
+     *
+     * 把决策抽出来是为了可测：用一个合成观测就能验证判定策略，
+     * 不必依赖场景里恰好存在一个 30 m 外的碰撞体。
+     *
+     * @param {{available?:boolean, weaponRangeCheck?:string,
+     *          cameraRayContact?:boolean|null, cameraRayDistance?:number|null,
+     *          hitDistance?:number|null, via?:string}} obs
+     */
+    decideFromObservation: function (obs) {
+      var o = obs || {};
+      if (o.available === false) {
+        return { allowed: true, reason: 'guard-unavailable', weaponRangeCheck: 'unknown', cameraRayContact: null, hitDistance: null };
+      }
+      if (o.weaponRangeCheck === 'beyond-range') {
+        return { allowed: false, reason: 'beyond-range', weaponRangeCheck: 'beyond-range', cameraRayContact: o.cameraRayContact, hitDistance: o.hitDistance == null ? null : o.hitDistance };
+      }
+      if (o.weaponRangeCheck === 'in-range') {
+        return { allowed: true, reason: 'in-range', weaponRangeCheck: 'in-range', cameraRayContact: o.cameraRayContact, hitDistance: o.hitDistance == null ? null : o.hitDistance };
+      }
+      // weaponRangeCheck === 'unknown'
+      if (o.cameraRayContact === false) {
+        return { allowed: true, reason: 'camera-ray-no-contact', weaponRangeCheck: 'unknown', cameraRayContact: false, hitDistance: null };
+      }
+      return { allowed: true, reason: 'unknown', weaponRangeCheck: 'unknown', cameraRayContact: o.cameraRayContact === undefined ? null : o.cameraRayContact, hitDistance: null };
+    },
+
+    /**
+     * 开火前的最终闸门：先观测，再交给纯决策函数。
      *
      * 判定策略（刻意保守的方向是「不要错误阻断」）：
-     *   1) 引擎状态读不到            → 放行，reason=guard-unavailable
-     *   2) 测到碰撞且距离 > 25       → 拦截，reason=beyond-range   ← 唯一的拦截条件
-     *   3) 测到碰撞且距离 <= 25      → 放行，reason=in-range
-     *   4) 射线完全没碰到东西        → **放行**，reason=camera-ray-no-contact
+     *   1) 引擎状态读不到            → 放行  reason=guard-unavailable
+     *   2) 测到碰撞且距离 > 25       → 拦截  reason=beyond-range   ← 唯一的拦截条件
+     *   3) 测到碰撞且距离 <= 25      → 放行  reason=in-range
+     *   4) 射线完全没碰到东西        → **放行**  reason=camera-ray-no-contact
      *
      * 第 4 条是刻意这么定的：相机射线没碰到东西，只说明「这条零半径视线上没有碰撞体」，
      * 不等于武器打不中 —— 武器是半径 2m 的 SphereCast，且从枪口而不是相机出发。
@@ -322,37 +355,46 @@
      */
     allowShotAt: function (nx, ny) {
       if (!available()) {
-        return { allowed: true, reason: 'guard-unavailable', weaponRangeCheck: 'unknown', cameraRayContact: null, hitDistance: null };
+        return this.decideFromObservation({ available: false });
       }
 
       var p = this.probeScreenPoint(nx, ny);
-      var diag = {
+      var d = this.decideFromObservation({
+        available: true,
+        weaponRangeCheck: p.weaponRangeCheck,
+        cameraRayContact: p.cameraRayContact,
+        cameraRayDistance: p.cameraRayDistance,
+        hitDistance: p.hitDistance
+      });
+      d.diag = {
         weaponRangeCheck: p.weaponRangeCheck,
         cameraRayContact: p.cameraRayContact,
         cameraRayDistance: p.cameraRayDistance,
         candidateTargetDistance: p.candidateTargetDistance
       };
-
-      if (p.verdict === 'OUT_OF_RANGE') {
-        return { allowed: false, reason: 'beyond-range', hitDistance: p.hitDistance, via: 'screen', diag: diag };
-      }
-      if (p.verdict === 'IN_RANGE') {
-        return { allowed: true, reason: 'in-range', hitDistance: p.hitDistance, via: 'screen', diag: diag };
+      if (d.reason !== 'camera-ray-no-contact' && d.reason !== 'unknown') {
+        d.via = 'screen';
+        return d;
       }
 
       // 屏幕点这条路本身不可用（某个版本的 ScreenPointToRay 约定没对上），
       // 退一步用准星射线做同样的判断：策略在开火前已经先瞄准，准星方向就是射向。
       var f = this.probe();
-      if (f.verdict === 'UNAVAILABLE') {
-        return { allowed: true, reason: 'guard-unavailable', weaponRangeCheck: 'unknown', cameraRayContact: null, hitDistance: null, via: 'crosshair' };
-      }
-      if (f.verdict === 'OUT_OF_RANGE') {
-        return { allowed: false, reason: 'beyond-range', hitDistance: f.hitDistance, via: 'crosshair', diag: { weaponRangeCheck: f.weaponRangeCheck, cameraRayContact: f.cameraRayContact, cameraRayDistance: f.cameraRayDistance, candidateTargetDistance: null } };
-      }
-      if (f.verdict === 'NO_CONTACT') {
-        return { allowed: true, reason: 'camera-ray-no-contact', hitDistance: null, via: 'crosshair', diag: { weaponRangeCheck: 'unknown', cameraRayContact: false, cameraRayDistance: null, candidateTargetDistance: null } };
-      }
-      return { allowed: true, reason: 'in-range', hitDistance: f.hitDistance, via: 'crosshair', diag: { weaponRangeCheck: f.weaponRangeCheck, cameraRayContact: f.cameraRayContact, cameraRayDistance: f.cameraRayDistance, candidateTargetDistance: null } };
+      var d2 = this.decideFromObservation({
+        available: f.verdict !== 'UNAVAILABLE',
+        weaponRangeCheck: f.weaponRangeCheck,
+        cameraRayContact: f.cameraRayContact,
+        cameraRayDistance: f.cameraRayDistance,
+        hitDistance: f.hitDistance
+      });
+      d2.via = 'crosshair';
+      d2.diag = {
+        weaponRangeCheck: f.weaponRangeCheck,
+        cameraRayContact: f.cameraRayContact,
+        cameraRayDistance: f.cameraRayDistance,
+        candidateTargetDistance: null
+      };
+      return d2;
     },
 
     /**

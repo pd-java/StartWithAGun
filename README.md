@@ -242,8 +242,24 @@ web/autoplay/
 ```bash
 node tools/autoplay-probe.mjs      # 一次性体检：输入链路 / 目标识别 / 存档键结构
 node tools/autoplay-e2e.mjs        # 端到端：启动→点过闪屏→战斗→射击→暂停/恢复/停止
-node tools/autoplay-e2e-guard5.mjs # 闸门语义 + 生命周期（新判定口径，推荐跑这个）
+node tools/autoplay-regression.mjs # ★ 回归套件（10 项全通过）
+node tools/autoplay-e2e-guard5.mjs # 闸门语义 + 生命周期（人工观察用）
 node tools/autoplay-scene.mjs      # 只读场景探针（sceneCount 可读；活动场景名暂读不到）
 ```
 
 都用无头 Chrome + CDP 驱动，运行在 `http://127.0.0.1:8848/`（先 `cd web && node server.js`）。
+
+`autoplay-regression.mjs` 覆盖的 10 项（判定策略用**合成观测**测，不依赖场景里恰好有 30 m 外的碰撞体）：
+
+| # | 验证内容 | 结果 |
+|---|---|---|
+| 1 | 引擎不可读时诊断失败不会永久锁死（置空 `__wasmMainExports` → 恢复 → 仍可读） | PASS |
+| 2a | 合成：无接触 → 放行且不报超距 | PASS |
+| 2b | 实测：`allowShot()` 不返回 `beyond-range` | PASS |
+| 3 | 合成超距接触点（94.8 m）触发阻塞 | PASS |
+| 3b | 合成射程内（7.2 m）不被阻塞 | PASS |
+| 3c | 合成引擎不可用不被阻塞 | PASS |
+| 4 | 暂停期间输入调用数 = 0，射击计数不变 | PASS |
+| 5 | 恢复后能重新读到相机状态，ticks 推进 | PASS |
+| 6 | 停止后输入调用数 = 0，射击计数不变 | PASS |
+| 7 | 教程序列对象缺失时如实报告（`status.targets` 与视觉层一致、无 error） | PASS |
