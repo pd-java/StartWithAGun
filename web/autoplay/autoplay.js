@@ -40,7 +40,8 @@
     consecutiveErrors: 0,
     startedAt: 0,
     lastBlock: null,
-    stats: { ticks: 0, shots: 0, taps: 0, errors: 0, blocked: 0 },
+    lastGate: null,
+    stats: { ticks: 0, shots: 0, taps: 0, errors: 0, blocked: 0, blockedBeyondRange: 0, firedWithoutContact: 0 },
 
     config: CFG,
 
@@ -82,8 +83,9 @@
       self.lastError = null;
       self.consecutiveErrors = 0;
       self.startedAt = performance.now();
-      self.stats = { ticks: 0, shots: 0, taps: 0, errors: 0, blocked: 0 };
+      self.stats = { ticks: 0, shots: 0, taps: 0, errors: 0, blocked: 0, blockedBeyondRange: 0, firedWithoutContact: 0 };
       self.lastBlock = null;
+      self.lastGate = null;
       if (window.AutoplayRange) window.AutoplayRange.invalidate();
       if (window.AutoplayStrategy) window.AutoplayStrategy.reset();
 
@@ -248,20 +250,30 @@
 
       // ── 射程闸门 ──────────────────────────────────────────────
       // 实测：Shoot / SimulateShot 的球扫 maxDistance 硬编码 25（世界单位）。
-      // 目标在 25 之外时开火只会空放，并且会掩盖「打不到」的真实原因，
-      // 所以这里宁可不开火，把状态如实暴露出来（WAIT，不是 SHOOT）。
+      // 但相机射线与武器资格门不等价（原点、半径、掩码都可能不同），
+      // 所以闸门只在「确实测到碰撞且距离超出 25」时拦截；
+      // 「相机射线没碰到东西」只作为诊断保留，不阻断 —— 否则会错误阻断。
       if (action.type === 'SHOOT' && window.AutoplayRange) {
-        // 视觉说这里有个靶子，闸门回答「引擎够不够得到」：
-        // 沿该屏幕点的射线若超过 25（球扫上限），开火只会空放。
         var gate = window.AutoplayRange.allowShotAt(action.target.x, action.target.y);
+        self.lastGate = {
+          allowed: gate.allowed,
+          reason: gate.reason,
+          via: gate.via || null,
+          weaponRangeCheck: gate.diag ? gate.diag.weaponRangeCheck : (gate.weaponRangeCheck || 'unknown'),
+          cameraRayContact: gate.diag ? gate.diag.cameraRayContact : (gate.cameraRayContact === undefined ? null : gate.cameraRayContact),
+          cameraRayDistance: gate.diag ? gate.diag.cameraRayDistance : null,
+          hitDistance: gate.hitDistance
+        };
         if (!gate.allowed) {
           self.stats.blocked++;
+          self.stats.blockedBeyondRange++;
           self.lastBlock = gate.reason;
           if (D) D.result(action, false, gate.reason);
-          self.emit('blocked', { reason: gate.reason, range: window.AutoplayRange.RANGE, hitDistance: gate.hitDistance });
+          self.emit('blocked', { reason: gate.reason, range: window.AutoplayRange.RANGE, hitDistance: gate.hitDistance, diag: self.lastGate });
           self.consecutiveErrors = 0;
           return Promise.resolve();
         }
+        if (gate.reason === 'camera-ray-no-contact') self.stats.firedWithoutContact++;
         self.lastBlock = null;
       }
 
@@ -320,12 +332,21 @@
         generation: this.generation,
         error: this.lastError,
         lastBlock: this.lastBlock,
+        lastGate: this.lastGate,
         stats: this.stats,
         uptimeMs: this.startedAt ? Math.round(performance.now() - this.startedAt) : 0,
         scene: obs && obs.scene,
         targets: obs && obs.targets ? obs.targets.length : 0,
         metrics: obs && obs.metrics ? obs.metrics : null,
-        range: range ? { verdict: range.verdict, hitDistance: range.hitDistance, range: range.range, available: range.available } : null
+        range: range ? {
+          verdict: range.verdict,
+          hitDistance: range.hitDistance,
+          range: range.range,
+          available: range.available,
+          cameraRayContact: range.cameraRayContact,
+          cameraRayDistance: range.cameraRayDistance,
+          weaponRangeCheck: range.weaponRangeCheck
+        } : null
       };
     }
   };

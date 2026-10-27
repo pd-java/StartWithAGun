@@ -31,21 +31,28 @@
     statusEl.className = 'ap-state ap-' + st.state.toLowerCase();
 
     if (metaEl) {
-      // 射程状态：把「为什么不开火」直接摆在面板上，避免看起来像卡住
+      // 射程状态：把「观察到的」和「据此拦截的」分开写，避免把诊断当成结论
       var rng = st.range;
       var rangeText = '';
       if (rng) {
-        if (rng.verdict === 'OUT_OF_RANGE') rangeText = ' · 超射程';
-        else if (rng.verdict === 'NO_HIT') rangeText = ' · 前方无物';
+        if (rng.verdict === 'OUT_OF_RANGE') rangeText = ' · 超出射程';
+        else if (rng.verdict === 'NO_CONTACT') rangeText = ' · 相机射线未接触(不拦截)';
         else if (rng.verdict === 'IN_RANGE') rangeText = ' · 射程内';
         else rangeText = ' · 射程未知';
         if (rng.hitDistance != null) rangeText += '(' + rng.hitDistance.toFixed(1) + '/' + rng.range + ')';
+      }
+      var g = st.lastGate;
+      var gateText = '';
+      if (g) {
+        gateText = g.allowed
+          ? (g.reason === 'camera-ray-no-contact' ? ' · 上次放行(无接触)' : ' · 上次放行')
+          : ' · 上次拦截(' + (g.hitDistance != null ? g.hitDistance.toFixed(1) : '?') + '>' + (st.range ? st.range.range : 25) + ')';
       }
       metaEl.textContent = '场景 ' + (st.scene || '-') +
         ' · 目标 ' + st.targets +
         ' · 射击 ' + st.stats.shots +
         ' · 拦截 ' + (st.stats.blocked || 0) +
-        rangeText;
+        rangeText + gateText;
     }
 
     if (toggleBtn) {

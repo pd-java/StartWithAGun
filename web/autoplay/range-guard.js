@@ -12,9 +12,18 @@
  * 而 Shoot() 会在这道资格门前直接 return —— 表现就是「枪不响」。
  *
  * 所以自动玩必须能区分三件事，否则只会在原地空放：
- *   1) 准星已经在活体上            → 开火
- *   2) 准星虽然在活体上，但超出 25  → 不开火，报 OUT_OF_RANGE（等敌人走近 / 或场景本身无解）
- *   3) 引擎状态读不到              → 不阻断，交回视觉链路
+ *   1) 准星已经在活体上             → 开火
+ *   2) 测到碰撞但超出 25            → 不开火，报 beyond-range
+ *   3) 引擎状态读不到 / 射线没碰到东西 → 不阻断，交回视觉链路
+ *
+ * ★ 诊断 ≠ 决策
+ * -------------
+ * 本模块严格区分「观测到的事实」和「据此做的决定」：
+ *   事实：cameraRayContact / cameraRayDistance / candidateTargetDistance / weaponRangeCheck
+ *   决定：allowShotAt() 的 allowed
+ * 相机射线（零半径、从相机出发）和武器资格门（radius=2 的 SphereCast、从枪口出发、
+ * 可能用不同碰撞层掩码）并不等价，因此**只有「确实测到碰撞且距离 > 25」才拦截**。
+ * 「相机射线没碰到东西」只是相机射线没发现接触点，不能推断成武器打不中。
  *
  * 实现方式：WASM 导出了 __indirect_function_table 与 malloc，因此可以直接调用
  *   UnityEngine.Camera::get_main / Transform::get_position / Transform::get_forward /
@@ -167,14 +176,13 @@
     },
 
     /**
-     * 核心判定。
-     * @returns {{
-     *   available: boolean,
-     *   verdict: 'IN_RANGE'|'OUT_OF_RANGE'|'NO_HIT'|'UNAVAILABLE',
-     *   hitDistance: number|null,
-     *   range: number,
-     *   camera: {position:number[], forward:number[]}|null
-     * }}
+     * 准星射线判定：沿相机朝向打一条 maxDistance=25 的射线。
+     *
+     * 重要：这个结果**只是诊断**，不是「武器能不能命中」的等价证明。
+     *   相机原点 ≠ 枪口原点；
+     *   相机射线是零半径射线，武器资格门是 radius=2 的 SphereCast；
+     *   两者的碰撞层掩码也可能不同。
+     * 所以本函数如实报告「相机射线上发生了什么」，开不开火由 allowShotAt 的策略决定。
      */
     probe: function (opts) {
       var now = performance.now();
@@ -184,6 +192,10 @@
       var result = {
         available: available(),
         verdict: 'UNAVAILABLE',
+        cameraRayContact: null,     // 相机射线是否发现了碰撞体
+        cameraRayDistance: null,    // 相机射线首次碰撞的距离
+        candidateTargetDistance: null, // 候选目标的测量距离（准星这条路上没有独立目标，留空）
+        weaponRangeCheck: 'unknown',   // 'in-range' | 'beyond-range' | 'unknown'
         hitDistance: null,
         range: WEAPON_RANGE,
         camera: null
@@ -197,10 +209,14 @@
           if (!hit) {
             result.verdict = 'UNAVAILABLE';
           } else if (!hit.ok) {
-            result.verdict = 'NO_HIT';
+            result.verdict = 'NO_CONTACT';
+            result.cameraRayContact = false;
           } else {
-            result.hitDistance = hit.dist;
             result.verdict = hit.dist <= WEAPON_RANGE ? 'IN_RANGE' : 'OUT_OF_RANGE';
+            result.cameraRayContact = true;
+            result.cameraRayDistance = hit.dist;
+            result.hitDistance = hit.dist;
+            result.weaponRangeCheck = hit.dist <= WEAPON_RANGE ? 'in-range' : 'beyond-range';
           }
         }
       }
@@ -213,23 +229,43 @@
       return result;
     },
 
-    /** 是否允许开火：读不到引擎状态时放行（交回视觉链路），读到且超出射程时拦截 */
+    /**
+     * 准星路径的放行判断。
+     * 只有「确实测到碰撞且距离超过射程」才拦截；其余一律放行并注明原因。
+     */
     allowShot: function () {
       var p = this.probe();
-      if (p.verdict === 'UNAVAILABLE') return { allowed: true, reason: 'guard-unavailable' };
-      if (p.verdict === 'OUT_OF_RANGE') return { allowed: false, reason: 'out-of-range' };
-      return { allowed: true, reason: p.verdict.toLowerCase() };
+      if (p.verdict === 'UNAVAILABLE') return { allowed: true, reason: 'guard-unavailable', weaponRangeCheck: 'unknown' };
+      if (p.verdict === 'OUT_OF_RANGE') return { allowed: false, reason: 'beyond-range', hitDistance: p.hitDistance, weaponRangeCheck: 'beyond-range' };
+      if (p.verdict === 'NO_CONTACT') return { allowed: true, reason: 'camera-ray-no-contact', weaponRangeCheck: 'unknown' };
+      return { allowed: true, reason: 'in-range', hitDistance: p.hitDistance, weaponRangeCheck: 'in-range' };
     },
 
     /**
      * 对「屏幕上某个归一化点」判断这一枪能否打到东西。
-     * 视觉链路说「这里有个靶子」，闸门负责回答「引擎能不能真的够到它」。
+     * 视觉链路说「这里有个靶子」，闸门负责回答「沿这条视线，引擎测到了什么」。
      *
-     * @returns {{available:boolean, verdict:string, hitDistance:number|null, range:number}}
-     *          verdict: IN_RANGE | OUT_OF_RANGE | NO_CONTACT | UNAVAILABLE
+     * 返回的每个字段只描述**观测到的事实**，不描述结论：
+     *   cameraRayContact      相机射线有没有碰到东西     true/false/null(未知)
+     *   candidateTargetDistance 目标候选的测量距离        这里无法独立测量，恒为 null
+     *   cameraRayDistance     相机射线首次碰撞距离
+     *   weaponRangeCheck      武器射程检查结论           'in-range'|'beyond-range'|'unknown'
+     *
+     * @returns {{available:boolean, verdict:string, cameraRayContact:boolean|null,
+     *            cameraRayDistance:number|null, candidateTargetDistance:number|null,
+     *            weaponRangeCheck:string, hitDistance:number|null, range:number}}
      */
     probeScreenPoint: function (nx, ny, opts) {
-      var out = { available: available(), verdict: 'UNAVAILABLE', hitDistance: null, range: WEAPON_RANGE };
+      var out = {
+        available: available(),
+        verdict: 'UNAVAILABLE',
+        cameraRayContact: null,
+        cameraRayDistance: null,
+        candidateTargetDistance: null,
+        weaponRangeCheck: 'unknown',
+        hitDistance: null,
+        range: WEAPON_RANGE
+      };
       if (!out.available) return out;
 
       var cam = callFn(SLOT.camMain, [0]);
@@ -260,32 +296,63 @@
       if (r !== 0 && r !== 1) return out;
       if (r === 0) {
         out.verdict = 'NO_CONTACT';
+        out.cameraRayContact = false;
         return out;
       }
-      out.hitDistance = f32at(hitPtr + HIT_OFF_DISTANCE);
-      out.verdict = out.hitDistance <= WEAPON_RANGE ? 'IN_RANGE' : 'OUT_OF_RANGE';
+      out.cameraRayContact = true;
+      out.cameraRayDistance = f32at(hitPtr + HIT_OFF_DISTANCE);
+      out.hitDistance = out.cameraRayDistance;
+      out.weaponRangeCheck = out.cameraRayDistance <= WEAPON_RANGE ? 'in-range' : 'beyond-range';
+      out.verdict = out.cameraRayDistance <= WEAPON_RANGE ? 'IN_RANGE' : 'OUT_OF_RANGE';
       return out;
     },
 
     /**
-     * 开火前的最终闸门：视觉给了一个屏幕点，问引擎「够得到吗」。
-     * 读不到引擎状态 → 放行（不能因为工具不可用就瘫痪自动玩）。
+     * 开火前的最终闸门。
+     *
+     * 判定策略（刻意保守的方向是「不要错误阻断」）：
+     *   1) 引擎状态读不到            → 放行，reason=guard-unavailable
+     *   2) 测到碰撞且距离 > 25       → 拦截，reason=beyond-range   ← 唯一的拦截条件
+     *   3) 测到碰撞且距离 <= 25      → 放行，reason=in-range
+     *   4) 射线完全没碰到东西        → **放行**，reason=camera-ray-no-contact
+     *
+     * 第 4 条是刻意这么定的：相机射线没碰到东西，只说明「这条零半径视线上没有碰撞体」，
+     * 不等于武器打不中 —— 武器是半径 2m 的 SphereCast，且从枪口而不是相机出发。
+     * 把这个当拦截条件会造成错误阻断，所以它只作为诊断信息回传。
      */
     allowShotAt: function (nx, ny) {
-      if (!available()) return { allowed: true, reason: 'guard-unavailable' };
+      if (!available()) {
+        return { allowed: true, reason: 'guard-unavailable', weaponRangeCheck: 'unknown', cameraRayContact: null, hitDistance: null };
+      }
 
       var p = this.probeScreenPoint(nx, ny);
-      if (p.verdict === 'OUT_OF_RANGE') return { allowed: false, reason: 'out-of-range', hitDistance: p.hitDistance };
-      if (p.verdict === 'NO_CONTACT') return { allowed: false, reason: 'no-contact', hitDistance: null };
-      if (p.verdict === 'IN_RANGE') return { allowed: true, reason: 'in-range', hitDistance: p.hitDistance };
+      var diag = {
+        weaponRangeCheck: p.weaponRangeCheck,
+        cameraRayContact: p.cameraRayContact,
+        cameraRayDistance: p.cameraRayDistance,
+        candidateTargetDistance: p.candidateTargetDistance
+      };
 
-      // 屏幕点这条路暂时不可用（例如某个版本的 WorldToScreenPoint 约定没对上），
-      // 退一步用准星射线做同样的判断：策略在开火前已经先瞄准，所以准星方向就是射向。
+      if (p.verdict === 'OUT_OF_RANGE') {
+        return { allowed: false, reason: 'beyond-range', hitDistance: p.hitDistance, via: 'screen', diag: diag };
+      }
+      if (p.verdict === 'IN_RANGE') {
+        return { allowed: true, reason: 'in-range', hitDistance: p.hitDistance, via: 'screen', diag: diag };
+      }
+
+      // 屏幕点这条路本身不可用（某个版本的 ScreenPointToRay 约定没对上），
+      // 退一步用准星射线做同样的判断：策略在开火前已经先瞄准，准星方向就是射向。
       var f = this.probe();
-      if (f.verdict === 'UNAVAILABLE') return { allowed: true, reason: 'guard-unavailable' };
-      if (f.verdict === 'OUT_OF_RANGE') return { allowed: false, reason: 'out-of-range', hitDistance: f.hitDistance, via: 'crosshair' };
-      if (f.verdict === 'NO_HIT') return { allowed: false, reason: 'no-contact', hitDistance: null, via: 'crosshair' };
-      return { allowed: true, reason: 'in-range', hitDistance: f.hitDistance, via: 'crosshair' };
+      if (f.verdict === 'UNAVAILABLE') {
+        return { allowed: true, reason: 'guard-unavailable', weaponRangeCheck: 'unknown', cameraRayContact: null, hitDistance: null, via: 'crosshair' };
+      }
+      if (f.verdict === 'OUT_OF_RANGE') {
+        return { allowed: false, reason: 'beyond-range', hitDistance: f.hitDistance, via: 'crosshair', diag: { weaponRangeCheck: f.weaponRangeCheck, cameraRayContact: f.cameraRayContact, cameraRayDistance: f.cameraRayDistance, candidateTargetDistance: null } };
+      }
+      if (f.verdict === 'NO_CONTACT') {
+        return { allowed: true, reason: 'camera-ray-no-contact', hitDistance: null, via: 'crosshair', diag: { weaponRangeCheck: 'unknown', cameraRayContact: false, cameraRayDistance: null, candidateTargetDistance: null } };
+      }
+      return { allowed: true, reason: 'in-range', hitDistance: f.hitDistance, via: 'crosshair', diag: { weaponRangeCheck: f.weaponRangeCheck, cameraRayContact: f.cameraRayContact, cameraRayDistance: f.cameraRayDistance, candidateTargetDistance: null } };
     },
 
     /**
