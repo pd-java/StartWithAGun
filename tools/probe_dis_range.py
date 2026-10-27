@@ -192,9 +192,11 @@ def main():
             v, _ = M.uleb(code, off + 1)
             extra = ' %d' % v
         elif op == 0x43:
-            extra = ' f32'
+            import struct
+            extra = ' %g' % struct.unpack('<f', code[off + 1:off + 5])[0]
         elif op == 0x44:
-            extra = ' f64'
+            import struct
+            extra = ' %g' % struct.unpack('<d', code[off + 1:off + 9])[0]
         elif op == 0x22:
             pass
         if is_show:

@@ -31,10 +31,21 @@
     statusEl.className = 'ap-state ap-' + st.state.toLowerCase();
 
     if (metaEl) {
+      // 射程状态：把「为什么不开火」直接摆在面板上，避免看起来像卡住
+      var rng = st.range;
+      var rangeText = '';
+      if (rng) {
+        if (rng.verdict === 'OUT_OF_RANGE') rangeText = ' · 超射程';
+        else if (rng.verdict === 'NO_HIT') rangeText = ' · 前方无物';
+        else if (rng.verdict === 'IN_RANGE') rangeText = ' · 射程内';
+        else rangeText = ' · 射程未知';
+        if (rng.hitDistance != null) rangeText += '(' + rng.hitDistance.toFixed(1) + '/' + rng.range + ')';
+      }
       metaEl.textContent = '场景 ' + (st.scene || '-') +
         ' · 目标 ' + st.targets +
         ' · 射击 ' + st.stats.shots +
-        ' · 点击 ' + st.stats.taps;
+        ' · 拦截 ' + (st.stats.blocked || 0) +
+        rangeText;
     }
 
     if (toggleBtn) {

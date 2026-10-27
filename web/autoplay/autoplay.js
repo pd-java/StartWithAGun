@@ -39,7 +39,8 @@
     lastError: null,
     consecutiveErrors: 0,
     startedAt: 0,
-    stats: { ticks: 0, shots: 0, taps: 0, errors: 0 },
+    lastBlock: null,
+    stats: { ticks: 0, shots: 0, taps: 0, errors: 0, blocked: 0 },
 
     config: CFG,
 
@@ -81,7 +82,9 @@
       self.lastError = null;
       self.consecutiveErrors = 0;
       self.startedAt = performance.now();
-      self.stats = { ticks: 0, shots: 0, taps: 0, errors: 0 };
+      self.stats = { ticks: 0, shots: 0, taps: 0, errors: 0, blocked: 0 };
+      self.lastBlock = null;
+      if (window.AutoplayRange) window.AutoplayRange.invalidate();
       if (window.AutoplayStrategy) window.AutoplayStrategy.reset();
 
       var gen = ++self.generation;
@@ -243,6 +246,25 @@
         return gen === self.generation && self.enabled && self.state === 'RUNNING';
       };
 
+      // ── 射程闸门 ──────────────────────────────────────────────
+      // 实测：Shoot / SimulateShot 的球扫 maxDistance 硬编码 25（世界单位）。
+      // 目标在 25 之外时开火只会空放，并且会掩盖「打不到」的真实原因，
+      // 所以这里宁可不开火，把状态如实暴露出来（WAIT，不是 SHOOT）。
+      if (action.type === 'SHOOT' && window.AutoplayRange) {
+        // 视觉说这里有个靶子，闸门回答「引擎够不够得到」：
+        // 沿该屏幕点的射线若超过 25（球扫上限），开火只会空放。
+        var gate = window.AutoplayRange.allowShotAt(action.target.x, action.target.y);
+        if (!gate.allowed) {
+          self.stats.blocked++;
+          self.lastBlock = gate.reason;
+          if (D) D.result(action, false, gate.reason);
+          self.emit('blocked', { reason: gate.reason, range: window.AutoplayRange.RANGE, hitDistance: gate.hitDistance });
+          self.consecutiveErrors = 0;
+          return Promise.resolve();
+        }
+        self.lastBlock = null;
+      }
+
       var p;
       if (action.type === 'SHOOT') {
         p = I.click(action.target.x, action.target.y, 70).then(function (done) {
@@ -291,16 +313,19 @@
     getStatus: function () {
       var P = window.AutoplayPerception;
       var obs = P ? P.observe() : null;
+      var range = window.AutoplayRange ? window.AutoplayRange.probe() : null;
       return {
         state: this.state,
         enabled: this.enabled,
         generation: this.generation,
         error: this.lastError,
+        lastBlock: this.lastBlock,
         stats: this.stats,
         uptimeMs: this.startedAt ? Math.round(performance.now() - this.startedAt) : 0,
         scene: obs && obs.scene,
         targets: obs && obs.targets ? obs.targets.length : 0,
-        metrics: obs && obs.metrics ? obs.metrics : null
+        metrics: obs && obs.metrics ? obs.metrics : null,
+        range: range ? { verdict: range.verdict, hitDistance: range.hitDistance, range: range.range, available: range.available } : null
       };
     }
   };
