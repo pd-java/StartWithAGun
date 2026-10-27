@@ -188,6 +188,18 @@ async function main() {
     return { p, f, yaw: yawZ(f), pitch: pitchZ(f) };
   };
 
+  // ── 前置条件 1：WASM 引擎可读 ─────────────────────────────────────
+  // 不能假设「进画面了引擎就一定可读」。限时轮询，超时如实报告「不可用」，
+  // 既不算通过也不算失败 —— 这样测试的结论才有边界。
+  log('\n=== 0) 前置条件：WASM 引擎 ===');
+  let wasmOk = false;
+  for (let i = 0; i < 30; i++) {
+    wasmOk = await ev('!!(window.AutoplayRange && window.AutoplayRange.available())');
+    if (wasmOk === true) { log(`  可读 @ ${(i + 1) * 2}s`); break; }
+    await sleep(2000);
+  }
+  if (!wasmOk) log('  ⚠ 60s 内未可读 —— 闸门相关结论记为「不可用」，不是「失败」');
+
   log('\n=== 1) 相机 ===');
   let c = await readCam();
   log(`  pos=(${c.p.map((v) => v.toFixed(2)).join(', ')})  fwd=(${c.f.map((v) => v.toFixed(4)).join(', ')})`);
