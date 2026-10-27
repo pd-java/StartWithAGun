@@ -82,13 +82,78 @@
 
   /**
    * 深色目标识别：本作靶场里敌人是浅色沙地上的深色小剪影。
-   * 只取画面上半部分（y 0.10~0.62），排除底部武器与中央镜筒区域。
+   * 只取画面上半部分（y 0.10~0.62），排除底部武器区域。
    * 返回结构与红靶一致，额外带 kind='dark'。
+   *
+   * ★ 关于中央排除区（改过一次，务必读完再动）
+   * ------------------------------------------
+   * 旧实现是在**像素级**无条件挖掉以 (0.5,0.42) 为心、半径 0.173 的圆，
+   * 目的是让镜筒/准星这些深色大圆环不参与连通域。副作用是：任何落在这个圆里的
+   * 真目标也一起被抠掉 —— 而靶子恰好就在 (0.48,0.43)。
+   *
+   * 现在改成**候选级的有条件抑制**：
+   *   1) 像素级不再挖洞，先把排除区内的候选也全部收进来
+   *   2) 给每个候选算可信度（尺寸 + 平均暗度，都是图像统计量）
+   *   3) 只有当区外存在「明显更可信」的候选时，才抑制区内低可信候选
+   *   4) 没有竞争候选 → 保留区内候选
+   *   5) 置信度接近 → 不凭位置删除，交给 annotateMotion 的多帧跟踪
+   * 这样排除区表达的是「抑制干扰候选」，而不是「无条件忽略某块屏幕」。
    */
+  var DISC = { cx: 0.5, cy: 0.42, r2: 0.030 };     // r ≈ 0.173，镜筒/准星所在圆
+  var DISC_CORE_R2 = 0.003;                         // r ≈ 0.055，准星本体
+  var CONF_MARGIN = 0.15;                           // 「明显更可信」的差距阈值
+
+  /** 候选可信度：真实检测依据（尺寸/暗度）+ 明确标注的人为优先级（近准星降权） */
+  function candidateConfidence(c) {
+    var sizeTerm = Math.min(1, c.size / 12);                          // 2..12 格线性
+    var darkTerm = Math.min(1, Math.max(0, (c.meanDarkness || 0) / 40));
+    var s = sizeTerm * 0.55 + darkTerm * 0.45;
+    var dx = c.x - DISC.cx, dy = c.y - DISC.cy;
+    if (dx * dx + dy * dy < DISC_CORE_R2) s -= 0.45;                  // 准星本体，人为降权
+    return Math.round(s * 1000) / 1000;
+  }
+
+  /**
+   * 排除区规则（纯函数，可单独测）。
+   * @returns {{kept:Array, suppressed:Array}}
+   */
+  function applyExclusionRules(cands) {
+    var inside = [], outside = [], i;
+    for (i = 0; i < cands.length; i++) (cands[i].inDisc ? inside : outside).push(cands[i]);
+
+    var bestOutside = null;
+    for (i = 0; i < outside.length; i++) {
+      if (!bestOutside || outside[i].confidence > bestOutside.confidence) bestOutside = outside[i];
+    }
+
+    var kept = outside.slice();
+    var suppressed = [];
+    for (i = 0; i < inside.length; i++) {
+      var c = inside[i];
+      if (!bestOutside) {                       // 规则 4：没有竞争候选
+        c.exclusion = 'kept-no-competitor';
+        kept.push(c);
+        continue;
+      }
+      if (c.confidence >= bestOutside.confidence - CONF_MARGIN) {   // 规则 5：置信度接近
+        c.exclusion = 'kept-close-confidence';
+        kept.push(c);
+        continue;
+      }
+      c.exclusion = 'suppressed-by-competitor'; // 规则 3：区外明显更可信
+      suppressed.push(c);
+    }
+    kept.sort(function (a, b) { return b.size - a.size; });
+    return { kept: kept, suppressed: suppressed };
+  }
+
   function detectDarkTargets(data, w, h) {
     var CELL = 8;
     var cols = Math.ceil(w / CELL), rows = Math.ceil(h / CELL);
     var cells = new Uint8Array(cols * rows);
+    // 每格累计「暗度增量」= 92 - lum，越暗越大；用于候选级可信度
+    var cellDark = new Uint32Array(cols * rows);
+    var cellCnt = new Uint32Array(cols * rows);
     var x, y, i;
     for (y = 0; y < h; y++) {
       var ny = y / h;
@@ -97,25 +162,25 @@
         i = (y * w + x) * 4;
         var lum = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
         if (lum > 92) continue;                       // 只取深色
-        var nx = x / w;
-        // 排除中央瞄准镜（镜筒本身是深色大圆环）
-        var dx = nx - 0.5, dy = ny - 0.42;
-        if (dx * dx + dy * dy < 0.030) continue;
-        cells[((y / CELL) | 0) * cols + ((x / CELL) | 0)] = 1;
+        var ci = ((y / CELL) | 0) * cols + ((x / CELL) | 0);
+        cells[ci] = 1;
+        cellDark[ci] += Math.round(92 - lum);
+        cellCnt[ci]++;
       }
     }
     var seen = new Uint8Array(cols * rows);
-    var out = [];
+    var cands = [];
     for (var cy = 0; cy < rows; cy++) {
       for (var cx = 0; cx < cols; cx++) {
         var idx = cy * cols + cx;
         if (!cells[idx] || seen[idx]) continue;
-        var sx = 0, sy = 0, n = 0, stack = [idx];
+        var sx = 0, sy = 0, n = 0, dSum = 0, pSum = 0, stack = [idx];
         seen[idx] = 1;
         while (stack.length) {
           var cur = stack.pop();
           var px = cur % cols, py = (cur / cols) | 0;
           sx += px; sy += py; n++;
+          dSum += cellDark[cur]; pSum += cellCnt[cur];
           var nb = [[1, 0], [-1, 0], [0, 1], [0, -1]];
           for (var k = 0; k < 4; k++) {
             var qx = px + nb[k][0], qy = py + nb[k][1];
@@ -126,13 +191,30 @@
         }
         // 2~40 格：太小是噪点，太大是地面/墙体
         if (n >= 2 && n <= 40) {
-          out.push({ x: (sx / n + 0.5) / cols, y: (sy / n + 0.5) / rows, size: n, kind: 'dark' });
+          var gx = (sx / n + 0.5) / cols, gy = (sy / n + 0.5) / rows;
+          var dxc = gx - DISC.cx, dyc = gy - DISC.cy;
+          var c = {
+            x: gx, y: gy, size: n, kind: 'dark',
+            meanDarkness: pSum ? dSum / pSum : 0,
+            inDisc: (dxc * dxc + dyc * dyc) < DISC.r2
+          };
+          c.confidence = candidateConfidence(c);
+          cands.push(c);
         }
       }
     }
-    out.sort(function (a, b) { return b.size - a.size; });
-    return out;
+    var r = applyExclusionRules(cands);
+    // 仅供测试/诊断读取，不参与决策
+    lastDarkDebug = {
+      total: cands.length,
+      inside: cands.filter(function (c) { return c.inDisc; }).length,
+      suppressed: r.suppressed.length,
+      kept: r.kept.length
+    };
+    return r.kept;
   }
+
+  var lastDarkDebug = { total: 0, inside: 0, suppressed: 0, kept: 0 };
 
   /** 只采集，不落地（便于「回调前/回调后」各试一次） */
   function capture() {
@@ -327,6 +409,13 @@
         })();
       });
     },
+
+    // ── 测试钩子（下划线前缀，只给回归测试用，不参与运行时决策） ──
+    __detectDarkTargets: function (data, w, h) { return detectDarkTargets(data, w, h); },
+    __applyExclusionRules: function (cands) { return applyExclusionRules(cands); },
+    __candidateConfidence: function (c) { return candidateConfidence(c); },
+    __darkDebug: function () { return lastDarkDebug; },
+    __disc: function () { return { cx: DISC.cx, cy: DISC.cy, r2: DISC.r2, coreR2: DISC_CORE_R2, margin: CONF_MARGIN }; },
 
     stats: function () { return { frameNo: frameNo, captured: stat.captured, nonBlack: stat.nonBlack, pre: stat.pre, post: stat.post, installed: installed }; },
 
